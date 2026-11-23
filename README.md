@@ -2,7 +2,7 @@
 
 ## Installation steps
 
-This is a manual installation
+This tool is an automated sequence of steps as from
 
 https://www.ibm.com/docs/en/cacms/1.0.x?topic=o2iocfcdus-optional-installing-opensearch-cluster-from-cp4ba-deployment-manually
 
