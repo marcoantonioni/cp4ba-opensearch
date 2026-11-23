@@ -1,0 +1,4 @@
+==============================================================
+[2026-11-23T16:39:15+0100] [INFO] Running with temporary folder '/tmp'
+[2026-11-23T16:39:15+0100] [INFO] Creating custom Opensearch cluster in 'cp4ba-opensearch-prod' namespace
+[2026-11-23T16:39:17+0100] [ERROR] No 'opensearch-tls-issuer' found, cannot precede.

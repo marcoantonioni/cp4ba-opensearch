@@ -1,0 +1,3 @@
+==============================================================
+[2026-11-23T16:30:56+0100] [INFO] Running with temporary folder '/tmp'
+[2026-11-23T16:30:56+0100] [INFO] Removing custom Opensearch cluster from 'cp4ba-opensearch-prod' namespace
