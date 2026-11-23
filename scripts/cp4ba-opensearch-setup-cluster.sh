@@ -63,7 +63,7 @@ if [[ -z "${_CFG}" ]]; then
   exit 1
 fi
 
-source "${_CFG}"
+source "${_CFG}" 2>/dev/null 1>/dev/null
 
 #----------------------------------------------------
 _SCRIPT_PATH="${BASH_SOURCE}"
@@ -380,12 +380,14 @@ log_msg "=============================================================="
 setTemporaryFolder
 
 if [[ "${_CMD}" = "install" ]]; then
-  log_info "${_CLR_GREEN}Creating custom Opensearch cluster in '${_CLR_YELLOW}${CP4BA_INST_NAMESPACE}${_CLR_GREEN}' namespace${_CLR_NC}"
+  log_info "${_CLR_GREEN}Creating custom Opensearch cluster '${_CLR_YELLOW}${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}${_CLR_GREEN}' in '${_CLR_YELLOW}${CP4BA_INST_NAMESPACE}${_CLR_GREEN}' namespace${_CLR_NC}"
   openSearchSetupClusterResources
+  log_info "${_CLR_GREEN}Opensearch cluster '${_CLR_YELLOW}${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}${_CLR_GREEN}' is ready.${_CLR_NC}"
 else
   if [[ "${_CMD}" = "remove" ]]; then
-    log_info "${_CLR_GREEN}Removing custom Opensearch cluster from '${_CLR_YELLOW}${CP4BA_INST_NAMESPACE}${_CLR_GREEN}' namespace${_CLR_NC}"
+    log_info "${_CLR_GREEN}Removing custom Opensearch cluster '${_CLR_YELLOW}${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}${_CLR_GREEN}' from '${_CLR_YELLOW}${CP4BA_INST_NAMESPACE}${_CLR_GREEN}' namespace${_CLR_NC}"
     openSearchDeleteClusterResources
+  log_info "${_CLR_GREEN}Opensearch cluster '${_CLR_YELLOW}${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}${_CLR_GREEN}' no longer exists.${_CLR_NC}"
   else
     log_error "Command -k not valid"
     usage
