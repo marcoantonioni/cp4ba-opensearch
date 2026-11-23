@@ -1,0 +1,11 @@
+output/*.yaml
+output/*.yml
+output/*.sql
+output/*.txt
+output/*.log
+output/*.out
+scripts/*.out
+scripts/*.log
+scratchpad.txt
+*.json
+

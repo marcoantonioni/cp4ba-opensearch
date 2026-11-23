@@ -1,4 +1,0 @@
-==============================================================
-[2026-11-23T16:40:41+0100] [INFO] Running with temporary folder '/tmp'
-[2026-11-23T16:40:41+0100] [INFO] Creating custom Opensearch cluster in 'cp4ba-opensearch-prod' namespace
-[2026-11-23T16:40:42+0100] [ERROR] Cannot install cluster without IBM operator 'ibm-opensearch-operator'
