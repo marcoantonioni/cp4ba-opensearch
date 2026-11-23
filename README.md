@@ -1,5 +1,7 @@
 # cp4ba-opensearch
 
+Custom OpenSearch cluster installation using CP4BA ibm-opensearch-operator
+
 ## Installation steps
 
 This tool is an automated sequence of steps as from
