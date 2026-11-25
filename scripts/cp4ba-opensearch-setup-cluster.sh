@@ -7,6 +7,7 @@ _me=$(basename "$0")
 _CFG=""
 _CMD=""
 _CSV_NAME=""
+_FORCE=false
 
 #--------------------------------------------------------
 _CLR_RED="\033[0;31m"   #'0;31' is Red's ANSI color code
@@ -46,11 +47,12 @@ setTemporaryFolder () {
 
 #--------------------------------------------------------
 # read command line params
-while getopts c:k: flag
+while getopts c:k:f flag
 do
     case "${flag}" in
         c) _CFG=${OPTARG};;
         k) _CMD=${OPTARG};;
+        f) _FORCE=true;;
     esac
 done
 
@@ -119,6 +121,7 @@ resourceExist () {
 
 #-----------------------------------------------------------------
 createTLSCertificate() {
+  log_info "Create TLS certificate for OpenSearch cluster"
 
   _TLS_ISSUER=$(oc get issuers.cert-manager.io -n $CP4BA_INST_NAMESPACE opensearch-tls-issuer --no-headers | wc -l)
   if [[ $_TLS_ISSUER -eq 0 ]]; then
@@ -188,12 +191,15 @@ fi
 
 #-----------------------------------------------------------------
 createAdminSecret() {
+  log_info "Create admin secret for OpenSearch cluster"
 
   oc create secret generic -n ${CP4BA_INST_NAMESPACE} ${CP4BA_INST_OPENSEARCH_CUSTOM_ADMIN_SECRET_NAME} --from-literal=opensearch-admin="${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_ADMIN_PASSWORD}" 2>/dev/null 1>/dev/null
 }
 
+
 #-----------------------------------------------------------------
 createOpenSearchCluster() {
+  log_info "Create OpenSearch cluster"
 
 _OS_CTR_ENV=$(oc get ClusterServiceVersion -n ${CP4BA_INST_NAMESPACE} ${_CSV_NAME} -o jsonpath="{.spec.install.spec.deployments[0].spec.template.spec.containers[0].env}")
 
@@ -305,9 +311,10 @@ EOF
 
 #-----------------------------------------------------------------
 waitOpenSearchClusterReady() {
+  log_info "Wait for OpenSearch cluster readiness"
   while true;
   do
-    _OS_AVAILABLE=$(oc get clusters.opensearch.cloudpackopen.ibm.com -n ${CP4BA_INST_NAMESPACE} ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME} --no-headers -o jsonpath="{.status.phase}" | sed 's/"//g')
+    _OS_AVAILABLE=$(oc get clusters.opensearch.cloudpackopen.ibm.com -n ${CP4BA_INST_NAMESPACE} ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME} --no-headers -o jsonpath="{.status.phase}" 2>/dev/null  | sed 's/"//g')
 
     if [[ "${_OS_AVAILABLE}" = "Available" ]]; then
       break
@@ -328,8 +335,156 @@ waitOpenSearchClusterReady() {
   while [[ $_SERVICE -lt 1 ]]
   do
     sleep 1
-    _SERVICE=$(oc get svc ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME} -n ${CP4BA_INST_NAMESPACE} --no-headers | wc -l)
+    _SERVICE=$(oc get svc ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME} -n ${CP4BA_INST_NAMESPACE} --no-headers 2>/dev/null  | wc -l)
 
+  done
+
+  while true;
+  do
+    _OS_CONDITIONS_AVAILABLE=$(oc get clusters.opensearch.cloudpackopen.ibm.com -n cp4ba-opensearch-prod my-opensearch -o jsonpath="{.status.conditions}" 2>/dev/null  | jq '.[] | select(.type=="Available").status' | sed 's/"//g')
+
+    if [[ "${_OS_CONDITIONS_AVAILABLE}" = "True" ]]; then
+      break
+    else
+      sleep 1  
+    fi
+  done
+
+}
+
+#-----------------------------------------------------------------
+configureClusterSecurity() {
+  log_info "Configure OpenSearch cluster security"
+
+cat <<EOF | oc create -f - 2>/dev/null 1>/dev/null
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${CP4BA_INST_OPENSEARCH_CUSTOM_GENAI_SECRET_NAME}
+  namespace: ${CP4BA_INST_NAMESPACE}
+type: Opaque
+stringData:
+  genai-service-user: "${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_ADMIN_PASSWORD}"
+EOF
+
+cat <<EOF | oc create -f - 2>/dev/null 1>/dev/null
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}-security-bootstrap
+  namespace: ${CP4BA_INST_NAMESPACE}
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: ibm-cp4ba-anyuid
+      containers:
+        - name: opensearch-bootstrap
+          image: registry.access.redhat.com/ubi8/ubi-minimal:latest
+          env:
+            - name: OS_USER
+              value: "opensearch-admin"
+            - name: OS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: ${CP4BA_INST_OPENSEARCH_CUSTOM_ADMIN_SECRET_NAME}
+                  key: opensearch-admin
+            - name: GENAI_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: ${CP4BA_INST_OPENSEARCH_CUSTOM_GENAI_SECRET_NAME}
+                  key: genai-service-user
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              
+              # Install curl
+              microdnf install -y curl && microdnf clean all
+
+              OS_URL="https://${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}.${CP4BA_INST_NAMESPACE}.svc.cluster.local:9200"
+              
+              echo "Waiting for OpenSearch..."
+              until curl -k -u "\$OS_USER:\$OS_PASS" "\$OS_URL" >/dev/null 2>&1; do
+                sleep 5
+              done
+
+              echo "Checking if user exists..."
+
+              USER_EXISTS=$(curl -k -u "\$OS_USER:\$OS_PASS" \
+                -s -o /dev/null -w "%{http_code}" \
+                "\$OS_URL/_plugins/_security/api/internalusers/genai-service-user")
+
+              if [ "$USER_EXISTS" = "200" ]; then
+                echo "User already exists. Skipping creation of user, roles, and mappings."
+              else
+                echo "User missing - creating user, roles, and mappings..."
+
+                echo "Creating service user..."
+                curl -k -u "\$OS_USER:\$OS_PASS" \
+                  -X PUT "\$OS_URL/_plugins/_security/api/internalusers/genai-service-user" \
+                  -H "Content-Type: application/json" \
+                  -d "{\"password\":\"\$GENAI_PASS\",\"attributes\":{\"description\":\"GenAI Content Assistant service user\"}}"
+
+                echo "Creating role: ibm-genai-index-manager..."
+                curl -k -u "\$OS_USER:\$OS_PASS" \
+                  -X PUT "\$OS_URL/_plugins/_security/api/roles/ibm-genai-index-manager" \
+                  -H "Content-Type: application/json" \
+                  -d '{
+                    "cluster_permissions": ["cluster:monitor/main"],
+                    "index_permissions": [
+                      {
+                        "index_patterns": ["ibm-genai-*"],
+                        "allowed_actions": ["create_index","manage"]
+                      }
+                    ]
+                  }'
+
+                echo "Creating role: ibm-genai-document-manager..."
+                curl -k -u "\$OS_USER:\$OS_PASS" \
+                  -X PUT "\$OS_URL/_plugins/_security/api/roles/ibm-genai-document-manager" \
+                  -H "Content-Type: application/json" \
+                  -d '{
+                    "index_permissions": [
+                      {
+                        "index_patterns": ["ibm-genai-*"],
+                        "allowed_actions": [
+                          "index","delete","read","write",
+                          "indices:admin/get","indices:admin/refresh"
+                        ]
+                      }
+                    ]
+                  }'
+
+                echo "Mapping role: ibm-genai-index-manager..."
+                curl -k -u "\$OS_USER:\$OS_PASS" \
+                  -X PUT "\$OS_URL/_plugins/_security/api/rolesmapping/ibm-genai-index-manager" \
+                  -H "Content-Type: application/json" \
+                  -d '{"users":["genai-service-user"]}'
+
+                echo "Mapping role: ibm-genai-document-manager..."
+                curl -k -u "\$OS_USER:\$OS_PASS" \
+                  -X PUT "\$OS_URL/_plugins/_security/api/rolesmapping/ibm-genai-document-manager" \
+                  -H "Content-Type: application/json" \
+                  -d '{"users":["genai-service-user"]}'
+
+                echo "Setup completed!"
+              fi
+
+              echo "Final verification..."
+              curl -k -u "\$OS_USER:\$OS_PASS" \
+                "\$OS_URL/_plugins/_security/api/internalusers/genai-service-user?pretty"
+EOF
+
+  while true;
+  do
+    _JOB_STATUS=$(oc get job ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}-security-bootstrap -n ${CP4BA_INST_NAMESPACE} --no-headers -o jsonpath="{.status.conditions}" | jq '.[] | select(.type=="Complete").status' | sed 's/"//g')
+    if [[ "${_JOB_STATUS}" = "True" ]]; then
+      break
+    else
+      sleep 1  
+    fi
   done
 
 }
@@ -344,10 +499,20 @@ openSearchSetupClusterResources() {
       exit 1
     fi
 
+    if [[ "${_FORCE}" = "true" ]]; then
+      log_info "Force removal of previously created OpenSearch resources"
+      openSearchDeleteClusterResources
+    fi
+
     createTLSCertificate
     createAdminSecret
     createOpenSearchCluster
     waitOpenSearchClusterReady
+    if [[ "${CP4BA_INST_OPENSEARCH_CUSTOM_USE_WITH_CONTENT_ASSISTANT}" = "true" ]]; then
+      configureClusterSecurity
+    fi
+    log_info "OpenSearch cluster ready"
+
   else
     log_error "OpenSearch custom cluster not configured, set CP4BA_INST_OPENSEARCH_CUSTOM_INSTALL=true"
   fi
@@ -371,8 +536,15 @@ openSearchDeleteClusterResources() {
     oc delete secret -n ${CP4BA_INST_NAMESPACE} ${CP4BA_INST_OPENSEARCH_CUSTOM_CERT_SECRET_NAME} 2>/dev/null 1>/dev/null
     oc delete secret -n ${CP4BA_INST_NAMESPACE} ${CP4BA_INST_OPENSEARCH_CUSTOM_ADMIN_SECRET_NAME} 2>/dev/null 1>/dev/null
     oc delete secret -n ${CP4BA_INST_NAMESPACE} ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME} 2>/dev/null 1>/dev/null
+
+    oc delete job -n ${CP4BA_INST_NAMESPACE} ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}-security-bootstrap 2>/dev/null 1>/dev/null
+
+    oc delete secret -n ${CP4BA_INST_NAMESPACE} "${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}-vector-db-creds" 2> /dev/null 1> /dev/null
+
   else
-    log_warning "OpenSearch cluster '${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}' doesn't exists."
+    if [[ "${_FORCE}" = "false" ]]; then
+      log_warning "OpenSearch cluster '${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}' doesn't exists."
+    fi
   fi 
 }
 
@@ -387,7 +559,7 @@ else
   if [[ "${_CMD}" = "remove" ]]; then
     log_info "${_CLR_GREEN}Removing custom Opensearch cluster '${_CLR_YELLOW}${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}${_CLR_GREEN}' from '${_CLR_YELLOW}${CP4BA_INST_NAMESPACE}${_CLR_GREEN}' namespace${_CLR_NC}"
     openSearchDeleteClusterResources
-  log_info "${_CLR_GREEN}Opensearch cluster '${_CLR_YELLOW}${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}${_CLR_GREEN}' no longer exists.${_CLR_NC}"
+    log_info "${_CLR_GREEN}Opensearch cluster '${_CLR_YELLOW}${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME}${_CLR_GREEN}' no longer exists.${_CLR_NC}"
   else
     log_error "Command -k not valid"
     usage
