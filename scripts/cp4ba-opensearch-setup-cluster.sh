@@ -123,13 +123,41 @@ resourceExist () {
 createTLSCertificate() {
   log_info "Create TLS certificate for OpenSearch cluster"
 
-  _TLS_ISSUER=$(oc get issuers.cert-manager.io -n $CP4BA_INST_NAMESPACE opensearch-tls-issuer --no-headers | wc -l)
+  _TLS_ISSUER=$(oc get issuers.cert-manager.io -n $CP4BA_INST_NAMESPACE opensearch-tls-issuer --no-headers 2>/dev/null | wc -l)
   if [[ $_TLS_ISSUER -eq 0 ]]; then
-    log_error "No 'opensearch-tls-issuer' found, cannot procede."
-    exit 1
+    log_warning "No 'opensearch-tls-issuer' found, installing now."
+
+cat <<EOF | oc apply -f - 2>/dev/null 1>/dev/null
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: opensearch-tls-issuer
+  namespace: ${CP4BA_INST_NAMESPACE}
+  labels:
+    app.kubernetes.io/created-by: ibm-opensearch-operator
+    app.kubernetes.io/instance: single
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: cluster
+    app.kubernetes.io/part-of: ibm-opensearch-operator
+spec:
+  ca:
+    secretName: icp4a-root-ca
+EOF
+
+    while true;
+    do
+      _OS_CONDITIONS_READY=$(oc get issuers.cert-manager.io -n $CP4BA_INST_NAMESPACE opensearch-tls-issuer -o jsonpath="{.status.conditions}" 2>/dev/null | jq '.[] | select(.type=="Ready").status' | sed 's/"//g')
+
+      if [[ "${_OS_CONDITIONS_READY}" = "True" ]]; then
+        log_info "TLS issuer 'opensearch-tls-issuer' ready."
+        break
+      else
+        sleep 1  
+      fi
+    done
   fi
 
-  _CPD_FQDN=$(oc get route -n ${CP4BA_INST_NAMESPACE} cpd -o jsonpath="{.spec.host}")
+  _CPD_FQDN=$(oc get route -n ${CP4BA_INST_NAMESPACE} cpd -o jsonpath="{.spec.host}" 2>/dev/null)
   IFS="." read -r skipIt1 skipIt2 _CLUSTER_DOMAIN <<< "${_CPD_FQDN}"
   unset IFS
 
@@ -199,13 +227,20 @@ createAdminSecret() {
 
 #-----------------------------------------------------------------
 createOpenSearchCluster() {
-  log_info "Create OpenSearch cluster"
 
-_OS_CTR_ENV=$(oc get ClusterServiceVersion -n ${CP4BA_INST_NAMESPACE} ${_CSV_NAME} -o jsonpath="{.spec.install.spec.deployments[0].spec.template.spec.containers[0].env}")
+  _CSV_NAME_VER=$(oc get ClusterServiceVersion -n ${CP4BA_INST_NAMESPACE} --no-headers 2>/dev/null | grep ibm-opensearch-operator | awk '{print $1}')
+  if [[ -z "${_CSV_NAME_VER}" ]]; then
+    log_error "Cannot find ClusterServiceVersion for ibm-opensearch-operator."
+    exit 1
+  fi
 
-_OS_VER=$(echo ${_OS_CTR_ENV} | jq '.[] | select(.name=="OPENSEARCH_VERSION")' | jq .value | sed 's/"//g')
-_OS_SEC_VER=$(echo ${_OS_CTR_ENV} | jq '.[] | select(.name=="OPENSEARCH_SECURITY_VERSION")' | jq .value | sed 's/"//g')
-_OS_KNN_VER=$(echo ${_OS_CTR_ENV} | jq '.[] | select(.name=="OPENSEARCH_PLUGIN_KNN_VERSION")' | jq .value | sed 's/"//g')
+  _OS_CTR_ENV=$(oc get ClusterServiceVersion -n ${CP4BA_INST_NAMESPACE} ${_CSV_NAME_VER} -o jsonpath="{.spec.install.spec.deployments[0].spec.template.spec.containers[0].env}")
+
+  _OS_VER=$(echo ${_OS_CTR_ENV} | jq '.[] | select(.name=="OPENSEARCH_VERSION")' | jq .value | sed 's/"//g')
+  _OS_SEC_VER=$(echo ${_OS_CTR_ENV} | jq '.[] | select(.name=="OPENSEARCH_SECURITY_VERSION")' | jq .value | sed 's/"//g')
+  _OS_KNN_VER=$(echo ${_OS_CTR_ENV} | jq '.[] | select(.name=="OPENSEARCH_PLUGIN_KNN_VERSION")' | jq .value | sed 's/"//g')
+
+  log_info "Create OpenSearch cluster v.${_OS_VER}"
 
 cat <<EOF | oc create -f - 2>/dev/null 1>/dev/null
 apiVersion: opensearch.cloudpackopen.ibm.com/v1
@@ -341,7 +376,7 @@ waitOpenSearchClusterReady() {
 
   while true;
   do
-    _OS_CONDITIONS_AVAILABLE=$(oc get clusters.opensearch.cloudpackopen.ibm.com -n cp4ba-opensearch-prod my-opensearch -o jsonpath="{.status.conditions}" 2>/dev/null  | jq '.[] | select(.type=="Available").status' | sed 's/"//g')
+    _OS_CONDITIONS_AVAILABLE=$(oc get clusters.opensearch.cloudpackopen.ibm.com -n ${CP4BA_INST_NAMESPACE} ${CP4BA_INST_OPENSEARCH_CUSTOM_CLUSTER_NAME} -o jsonpath="{.status.conditions}" 2>/dev/null  | jq '.[] | select(.type=="Available").status' | sed 's/"//g')
 
     if [[ "${_OS_CONDITIONS_AVAILABLE}" = "True" ]]; then
       break
@@ -490,18 +525,106 @@ EOF
 }
 
 #-----------------------------------------------------------------
+waitCSVSucceeded () {
+
+  _CSV_NAME=$1
+  _CSV_NS=$2
+  _seconds=0
+  _CSV_START_SECONDS=$SECONDS
+
+  if [[ -z "${_CSV_NS}" ]]; then
+    _CSV_NS="${CP4BA_INST_NAMESPACE}"
+  fi
+
+  log_info "${_CLR_GREEN}Wait CSV succeeded '${_CLR_YELLOW}${_CSV_NAME}${_CLR_GREEN}' in namespace '${_CLR_YELLOW}${_CSV_NS}${_CLR_GREEN}'"
+
+  while [ true ]
+  do
+    _CSV_NAME_VERSION=$(oc get csv -n ${_CSV_NS} | grep "$_CSV_NAME" | awk '{print $1}')
+    if [[ ! -z "${_CSV_NAME_VERSION}" ]]; then
+      while [ true ]
+      do
+          PHASE=$(oc get csv -n ${_CSV_NS} $_CSV_NAME_VERSION -o jsonpath="{.status.phase}")
+          if [ "${PHASE}" = "Succeeded" ]; then
+            if [ $_seconds -gt 0 ]; then
+              echo -e -n "\033[2K"
+            fi
+
+            NOW_SECONDS=$SECONDS
+            ELAPSED_SECONDS=$(( $NOW_SECONDS - $_CSV_START_SECONDS ))
+            TOT_SECONDS=$(($ELAPSED_SECONDS % 60))
+            TOT_MINUTES=$(( $(($ELAPSED_SECONDS / 60)) % 60))
+            TOT_HOURS=$(( $(($ELAPSED_SECONDS / 3600)) % 24))
+
+            log_info "${_CLR_GREEN}CSV '${_CLR_YELLOW}$_CSV_NAME_VERSION${_CLR_GREEN}' installation completed in [${_CLR_YELLOW}${TOT_HOURS}${_CLR_GREEN}h:${_CLR_YELLOW}${TOT_MINUTES}${_CLR_GREEN}m:${_CLR_YELLOW}${TOT_SECONDS}${_CLR_GREEN}s]"
+            break
+          else
+            # updateRotor $_seconds $_CSV_NAME_VERSION
+            ((_seconds=_seconds+1))
+            sleep 1
+          fi
+      done
+      break
+    else
+      updateRotor $_seconds $_CSV_NAME
+      ((_seconds=_seconds+1))
+      sleep 1
+    fi
+  done
+
+}
+
+#-----------------------------------------------------------------
 openSearchSetupClusterResources() {
   if [[ "${CP4BA_INST_OPENSEARCH_CUSTOM_INSTALL}" = "true" ]]; then
-    _CSV_NAME=$(oc get ClusterServiceVersion -n ${CP4BA_INST_NAMESPACE} --no-headers | grep ibm-opensearch-operator | awk '{print $1}')
-
-    if [[ -z "${_CSV_NAME}" ]]; then
-      log_error "Cannot install cluster without IBM operator 'ibm-opensearch-operator' in namespace '${CP4BA_INST_NAMESPACE}'"  
-      exit 1
-    fi
 
     if [[ "${_FORCE}" = "true" ]]; then
       log_info "Force removal of previously created OpenSearch resources"
       openSearchDeleteClusterResources
+    fi
+
+    # verify OpenSearch operator
+    _CSV_NAME=$(oc get ClusterServiceVersion -n ${CP4BA_INST_NAMESPACE} --no-headers 2>/dev/null | grep ibm-opensearch-operator | awk '{print $1}')
+
+    if [[ -z "${_CSV_NAME}" ]]; then
+      log_warning "Cannot find IBM operator 'ibm-opensearch-operator' in namespace '${CP4BA_INST_NAMESPACE}'"  
+      log_warning "May be no 'opensearch' tag in CP4BA_INST_OPT_COMPONENTS, installing the operator in namespace '${CP4BA_INST_NAMESPACE}'"  
+
+cat <<EOF | oc create -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  annotations:
+    cp4ba-opensearch-prod.common-service/config: 'true'
+    cp4ba-opensearch-prod.common-service/registry: 'true'
+    cp4ba-opensearch-prod.opensearch-request.ibm-opensearch-operator/config: ibm-opensearch-operator
+    cp4ba-opensearch-prod.opensearch-request.ibm-opensearch-operator/operatorNamespace: ${CP4BA_INST_NAMESPACE}
+    cp4ba-opensearch-prod.opensearch-request.ibm-opensearch-operator/request: ${CP4BA_INST_OPENSEARCH_SUBSCRIPTION_CHANNEL}
+  name: ibm-opensearch-operator
+  namespace: ${CP4BA_INST_NAMESPACE}
+  labels:
+    operator.ibm.com/opreq-control: 'true'
+    operators.coreos.com/ibm-opensearch-operator.${CP4BA_INST_NAMESPACE}: ''
+spec:
+  channel: ${CP4BA_INST_OPENSEARCH_SUBSCRIPTION_CHANNEL}
+  installPlanApproval: Automatic
+  name: ibm-opensearch-operator
+  source: ibm-opensearch-operator-catalog
+  sourceNamespace: ${CP4BA_INST_NAMESPACE}
+EOF
+
+      while true;
+      do
+        _CSV_NAME=$(oc get ClusterServiceVersion -n ${CP4BA_INST_NAMESPACE} --no-headers 2>/dev/null | grep ibm-opensearch-operator | awk '{print $1}')
+
+        if [[ -z "${_CSV_NAME}" ]]; then
+          sleep 5
+        else
+          break
+        fi
+      done
+
+      waitCSVSucceeded "ibm-opensearch-operator"
     fi
 
     createTLSCertificate
