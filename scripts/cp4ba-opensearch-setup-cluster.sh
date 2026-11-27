@@ -590,7 +590,7 @@ openSearchSetupClusterResources() {
       log_warning "Cannot find IBM operator 'ibm-opensearch-operator' in namespace '${CP4BA_INST_NAMESPACE}'"  
       log_warning "May be no 'opensearch' tag in CP4BA_INST_OPT_COMPONENTS, installing the operator in namespace '${CP4BA_INST_NAMESPACE}'"  
 
-cat <<EOF | oc create -f -
+cat <<EOF | oc create -f - 2>/dev/null 1>/dev/null
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
